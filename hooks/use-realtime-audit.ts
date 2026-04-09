@@ -1,0 +1,926 @@
+"use client"
+
+import { useEffect, useState, useCallback, useRef } from "react"
+import { createClient, isSupabaseConfigured } from "@/lib/supabase/client"
+import type { RealtimeChannel } from "@supabase/supabase-js"
+import {
+  getActivityStorageKey,
+  getChecklistStorageKey,
+  getNotesStorageKey,
+  loadActivityFromStorage,
+  loadChecklistFromStorage,
+  loadNotesFromStorage,
+  loadProgressFromStorage,
+  LOCAL_PROGRESS_STORAGE_KEY,
+  mergeActivityById,
+  mergeChecklistsForCategory,
+  mergeNotesById,
+  mergeProgressByCategory,
+} from "@/lib/audit-local-persistence"
+
+// Generate unique channel ID for each hook instance
+let channelCounter = 0
+function getUniqueChannelId() {
+  return `${Date.now()}-${++channelCounter}`
+}
+
+function pushLocalActivityLog(
+  categoryId: string,
+  log: Omit<ActivityLog, "id" | "created_at">
+) {
+  if (typeof window === "undefined") return
+  const key = getActivityStorageKey(categoryId)
+  const existing = window.localStorage.getItem(key)
+  let logs: ActivityLog[] = []
+  if (existing) {
+    try {
+      logs = JSON.parse(existing) as ActivityLog[]
+    } catch {
+      logs = []
+    }
+  }
+  const next: ActivityLog = {
+    id: `local-log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    created_at: new Date().toISOString(),
+    ...log,
+  }
+  const updated = [next, ...logs].slice(0, 50)
+  window.localStorage.setItem(key, JSON.stringify(updated))
+  window.dispatchEvent(new CustomEvent("audit-local-activity-updated", { detail: { categoryId } }))
+}
+
+export interface ChecklistItem {
+  id: string
+  item_id: string
+  category_id: string
+  is_checked: boolean
+  checked_by: string | null
+  checked_at: string | null
+  created_at: string
+}
+
+export interface Attachment {
+  url: string
+  name: string
+  type: string
+  size: number
+}
+
+export interface SharedNote {
+  id: string
+  item_id: string
+  category_id: string
+  content: string
+  author_name: string
+  attachments: Attachment[] | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ActivityLog {
+  id: string
+  category_id: string
+  item_id: string | null
+  action_type: string
+  action_description: string
+  performed_by: string
+  created_at: string
+}
+
+export interface CategoryProgress {
+  id: string
+  category_id: string
+  status: "not_started" | "in_progress" | "completed"
+  progress_percentage: number
+  updated_by: string | null
+  updated_at: string
+}
+
+export function useRealtimeChecklist(categoryId: string) {
+  const [checklistItems, setChecklistItems] = useState<ChecklistItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const isConfigured = isSupabaseConfigured()
+  const channelRef = useRef<RealtimeChannel | null>(null)
+  const channelIdRef = useRef<string>("")
+
+  useEffect(() => {
+    if (!isConfigured) {
+      if (typeof window !== "undefined") {
+        const stored = loadChecklistFromStorage(categoryId)
+        setChecklistItems(stored)
+      }
+      setLoading(false)
+      return
+    }
+
+    const localRows = loadChecklistFromStorage(categoryId)
+    setChecklistItems(localRows)
+
+    const supabase = createClient()
+    const uniqueId = getUniqueChannelId()
+    channelIdRef.current = uniqueId
+
+    const fetchItems = async () => {
+      const { data, error } = await supabase
+        .from("checklist_items")
+        .select("*")
+        .eq("category_id", categoryId)
+
+      if (!error && data) {
+        setChecklistItems(mergeChecklistsForCategory(localRows, data))
+      }
+      setLoading(false)
+    }
+
+    fetchItems()
+
+    const channel = supabase
+      .channel(`checklist-${categoryId}-${uniqueId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "checklist_items",
+          filter: `category_id=eq.${categoryId}`,
+        },
+        (payload) => {
+          if (payload.eventType === "INSERT") {
+            setChecklistItems((prev) => [...prev, payload.new as ChecklistItem])
+          } else if (payload.eventType === "UPDATE") {
+            setChecklistItems((prev) =>
+              prev.map((item) =>
+                item.id === (payload.new as ChecklistItem).id
+                  ? (payload.new as ChecklistItem)
+                  : item
+              )
+            )
+          } else if (payload.eventType === "DELETE") {
+            setChecklistItems((prev) =>
+              prev.filter((item) => item.id !== (payload.old as ChecklistItem).id)
+            )
+          }
+        }
+      )
+      .subscribe()
+
+    channelRef.current = channel
+
+    return () => {
+      if (channelRef.current) {
+        supabase.removeChannel(channelRef.current)
+        channelRef.current = null
+      }
+    }
+  }, [categoryId, isConfigured])
+
+  useEffect(() => {
+    if (typeof window === "undefined" || loading) return
+    window.localStorage.setItem(
+      getChecklistStorageKey(categoryId),
+      JSON.stringify(checklistItems)
+    )
+  }, [categoryId, checklistItems, loading])
+
+  const toggleItem = useCallback(
+    async (itemId: string, isChecked: boolean, userName: string) => {
+      if (!isConfigured) {
+        setChecklistItems((prev) => {
+          const existingItem = prev.find((item) => item.item_id === itemId)
+          if (existingItem) {
+            return prev.map((item) =>
+              item.id === existingItem.id
+                ? {
+                    ...item,
+                    is_checked: isChecked,
+                    checked_by: isChecked ? userName : null,
+                    checked_at: isChecked ? new Date().toISOString() : null,
+                  }
+                : item
+            )
+          }
+
+          return [
+            ...prev,
+            {
+              id: `local-check-${itemId}`,
+              item_id: itemId,
+              category_id: categoryId,
+              is_checked: isChecked,
+              checked_by: isChecked ? userName : null,
+              checked_at: isChecked ? new Date().toISOString() : null,
+              created_at: new Date().toISOString(),
+            },
+          ]
+        })
+        if (isChecked) {
+          pushLocalActivityLog(categoryId, {
+            category_id: categoryId,
+            item_id: itemId,
+            action_type: "check",
+            action_description: "항목을 체크했습니다",
+            performed_by: userName,
+          })
+        }
+        return
+      }
+
+      try {
+        const supabase = createClient()
+        const existingItem = checklistItems.find((item) => item.item_id === itemId)
+        const checkedAt = isChecked ? new Date().toISOString() : null
+
+        if (existingItem) {
+          const { error: upErr } = await supabase
+            .from("checklist_items")
+            .update({
+              is_checked: isChecked,
+              checked_by: isChecked ? userName : null,
+              checked_at: checkedAt,
+            })
+            .eq("id", existingItem.id)
+          if (upErr) throw upErr
+          setChecklistItems((prev) =>
+            prev.map((item) =>
+              item.id === existingItem.id
+                ? {
+                    ...item,
+                    is_checked: isChecked,
+                    checked_by: isChecked ? userName : null,
+                    checked_at: checkedAt,
+                  }
+                : item
+            )
+          )
+        } else {
+          const { data: newRow, error: insErr } = await supabase
+            .from("checklist_items")
+            .insert({
+              item_id: itemId,
+              category_id: categoryId,
+              is_checked: isChecked,
+              checked_by: isChecked ? userName : null,
+              checked_at: checkedAt,
+            })
+            .select()
+            .single()
+          if (insErr) throw insErr
+          if (newRow) {
+            setChecklistItems((prev) =>
+              mergeChecklistsForCategory(prev, [newRow as ChecklistItem])
+            )
+          }
+        }
+
+        if (isChecked) {
+          const fiveSecondsAgo = new Date(Date.now() - 5000).toISOString()
+          const { data: recentLogs } = await supabase
+            .from("activity_logs")
+            .select("id")
+            .eq("category_id", categoryId)
+            .eq("item_id", itemId)
+            .eq("action_type", "check")
+            .eq("performed_by", userName)
+            .gte("created_at", fiveSecondsAgo)
+            .limit(1)
+
+          if (!recentLogs || recentLogs.length === 0) {
+            await supabase.from("activity_logs").insert({
+              category_id: categoryId,
+              item_id: itemId,
+              action_type: "check",
+              action_description: "항목을 체크했습니다",
+              performed_by: userName,
+            })
+          }
+        } else {
+          await supabase
+            .from("activity_logs")
+            .delete()
+            .eq("category_id", categoryId)
+            .eq("item_id", itemId)
+            .in("action_type", ["check", "uncheck"])
+        }
+      } catch {
+        setChecklistItems((prev) =>
+          prev.map((item) =>
+            item.item_id === itemId
+              ? {
+                  ...item,
+                  is_checked: isChecked,
+                  checked_by: isChecked ? userName : null,
+                  checked_at: isChecked ? new Date().toISOString() : null,
+                }
+              : item
+          )
+        )
+        if (isChecked) {
+          pushLocalActivityLog(categoryId, {
+            category_id: categoryId,
+            item_id: itemId,
+            action_type: "check",
+            action_description: "항목을 체크했습니다",
+            performed_by: userName,
+          })
+        }
+      }
+    },
+    [categoryId, checklistItems, isConfigured]
+  )
+
+  return { checklistItems, loading, toggleItem }
+}
+
+export function useRealtimeNotes(categoryId: string) {
+  const [notes, setNotes] = useState<SharedNote[]>([])
+  const [loading, setLoading] = useState(true)
+  const isConfigured = isSupabaseConfigured()
+  const channelRef = useRef<RealtimeChannel | null>(null)
+
+  useEffect(() => {
+    if (!isConfigured) {
+      if (typeof window !== "undefined") {
+        setNotes(loadNotesFromStorage(categoryId))
+      }
+      setLoading(false)
+      return
+    }
+
+    const localNotes = loadNotesFromStorage(categoryId)
+    setNotes(localNotes)
+
+    const supabase = createClient()
+    const uniqueId = getUniqueChannelId()
+
+    const fetchNotes = async () => {
+      const { data, error } = await supabase
+        .from("shared_notes")
+        .select("*")
+        .eq("category_id", categoryId)
+        .order("created_at", { ascending: false })
+
+      if (!error && data) {
+        setNotes(mergeNotesById(localNotes, data))
+      }
+      setLoading(false)
+    }
+
+    fetchNotes()
+
+    const channel = supabase
+      .channel(`notes-${categoryId}-${uniqueId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "shared_notes",
+          filter: `category_id=eq.${categoryId}`,
+        },
+        (payload) => {
+          if (payload.eventType === "INSERT") {
+            setNotes((prev) => [payload.new as SharedNote, ...prev])
+          } else if (payload.eventType === "UPDATE") {
+            setNotes((prev) =>
+              prev.map((note) =>
+                note.id === (payload.new as SharedNote).id
+                  ? (payload.new as SharedNote)
+                  : note
+              )
+            )
+          } else if (payload.eventType === "DELETE") {
+            setNotes((prev) =>
+              prev.filter((note) => note.id !== (payload.old as SharedNote).id)
+            )
+          }
+        }
+      )
+      .subscribe()
+
+    channelRef.current = channel
+
+    return () => {
+      if (channelRef.current) {
+        supabase.removeChannel(channelRef.current)
+        channelRef.current = null
+      }
+    }
+  }, [categoryId, isConfigured])
+
+  useEffect(() => {
+    if (typeof window === "undefined" || loading) return
+    window.localStorage.setItem(getNotesStorageKey(categoryId), JSON.stringify(notes))
+  }, [categoryId, notes, loading])
+
+  const addNote = useCallback(
+    async (itemId: string, content: string, authorName: string, attachments?: Attachment[]) => {
+      if (!isConfigured) {
+        const now = new Date().toISOString()
+        setNotes((prev) => [
+          {
+            id: `local-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            item_id: itemId,
+            category_id: categoryId,
+            content,
+            author_name: authorName,
+            attachments: attachments && attachments.length > 0 ? attachments : null,
+            created_at: now,
+            updated_at: now,
+          },
+          ...prev,
+        ])
+        pushLocalActivityLog(categoryId, {
+          category_id: categoryId,
+          item_id: itemId,
+          action_type: "note",
+          action_description: `메모를 추가했습니다: "${content.substring(0, 30)}${content.length > 30 ? "..." : ""}"`,
+          performed_by: authorName,
+        })
+        return
+      }
+
+      try {
+        const supabase = createClient()
+        const { data: inserted, error: insErr } = await supabase
+          .from("shared_notes")
+          .insert({
+            item_id: itemId,
+            category_id: categoryId,
+            content,
+            author_name: authorName,
+            attachments: attachments && attachments.length > 0 ? attachments : null,
+          })
+          .select()
+          .single()
+        if (insErr) throw insErr
+        if (inserted) {
+          setNotes((prev) => mergeNotesById([inserted as SharedNote], prev))
+        }
+
+        const attachmentText = attachments && attachments.length > 0 
+          ? ` (첨부파일 ${attachments.length}개)` 
+          : ""
+        
+        const fiveSecondsAgo = new Date(Date.now() - 5000).toISOString()
+        const { data: recentLogs } = await supabase
+          .from("activity_logs")
+          .select("id")
+          .eq("category_id", categoryId)
+          .eq("item_id", itemId)
+          .eq("action_type", "note")
+          .eq("performed_by", authorName)
+          .gte("created_at", fiveSecondsAgo)
+          .limit(1)
+
+        if (!recentLogs || recentLogs.length === 0) {
+          await supabase.from("activity_logs").insert({
+            category_id: categoryId,
+            item_id: itemId,
+            action_type: "note",
+            action_description: `메모를 추가했습니다: "${content.substring(0, 30)}${content.length > 30 ? "..." : ""}"${attachmentText}`,
+            performed_by: authorName,
+          })
+        }
+      } catch {
+        const now = new Date().toISOString()
+        setNotes((prev) => [
+          {
+            id: `local-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            item_id: itemId,
+            category_id: categoryId,
+            content,
+            author_name: authorName,
+            attachments: attachments && attachments.length > 0 ? attachments : null,
+            created_at: now,
+            updated_at: now,
+          },
+          ...prev,
+        ])
+        pushLocalActivityLog(categoryId, {
+          category_id: categoryId,
+          item_id: itemId,
+          action_type: "note",
+          action_description: `메모를 추가했습니다: "${content.substring(0, 30)}${content.length > 30 ? "..." : ""}"`,
+          performed_by: authorName,
+        })
+      }
+    },
+    [categoryId, isConfigured]
+  )
+
+  const updateNote = useCallback(
+    async (
+      noteId: string,
+      content: string,
+      authorName: string,
+      attachments?: Attachment[] | null
+    ) => {
+      const applyLocal = () => {
+        setNotes((prev) =>
+          prev.map((note) =>
+            note.id === noteId
+              ? {
+                  ...note,
+                  content,
+                  author_name: authorName,
+                  updated_at: new Date().toISOString(),
+                  ...(attachments !== undefined
+                    ? {
+                        attachments:
+                          attachments && attachments.length > 0 ? attachments : null,
+                      }
+                    : {}),
+                }
+              : note
+          )
+        )
+      }
+
+      if (!isConfigured) {
+        applyLocal()
+        return
+      }
+
+      const note = notes.find((n) => n.id === noteId)
+
+      try {
+        const supabase = createClient()
+        const updatePayload: Record<string, unknown> = {
+          content,
+          updated_at: new Date().toISOString(),
+        }
+        if (attachments !== undefined) {
+          updatePayload.attachments =
+            attachments && attachments.length > 0 ? attachments : null
+        }
+
+        const { data: updated, error: upErr } = await supabase
+          .from("shared_notes")
+          .update(updatePayload)
+          .eq("id", noteId)
+          .select()
+          .single()
+
+        if (upErr) throw upErr
+        if (updated) {
+          setNotes((prev) =>
+            prev.map((n) => (n.id === noteId ? (updated as SharedNote) : n))
+          )
+        }
+
+        const fiveSecondsAgo = new Date(Date.now() - 5000).toISOString()
+        const { data: recentLogs } = await supabase
+          .from("activity_logs")
+          .select("id")
+          .eq("category_id", categoryId)
+          .eq("item_id", note?.item_id || null)
+          .eq("action_type", "note_edit")
+          .eq("performed_by", authorName)
+          .gte("created_at", fiveSecondsAgo)
+          .limit(1)
+
+        if (!recentLogs || recentLogs.length === 0) {
+          await supabase.from("activity_logs").insert({
+            category_id: categoryId,
+            item_id: note?.item_id || null,
+            action_type: "note_edit",
+            action_description: `메모를 수정했습니다: "${content.substring(0, 30)}${content.length > 30 ? "..." : ""}"`,
+            performed_by: authorName,
+          })
+        }
+      } catch {
+        applyLocal()
+      }
+    },
+    [categoryId, isConfigured, notes]
+  )
+
+  const deleteNote = useCallback(
+    async (noteId: string, authorName: string) => {
+      if (!isConfigured) {
+        setNotes((prev) => prev.filter((note) => note.id !== noteId))
+        return
+      }
+
+      const supabase = createClient()
+      const note = notes.find((n) => n.id === noteId)
+      
+      // Delete the note
+      await supabase.from("shared_notes").delete().eq("id", noteId)
+
+      // Delete all activity logs related to this note (add, edit, delete)
+      if (note?.item_id) {
+        await supabase
+          .from("activity_logs")
+          .delete()
+          .eq("category_id", categoryId)
+          .eq("item_id", note.item_id)
+          .in("action_type", ["note", "note_edit", "note_delete"])
+      }
+    },
+    [categoryId, isConfigured, notes]
+  )
+
+  return { notes, loading, addNote, updateNote, deleteNote }
+}
+
+export function useRealtimeActivityLog(categoryId: string) {
+  const [logs, setLogs] = useState<ActivityLog[]>([])
+  const [loading, setLoading] = useState(true)
+  const isConfigured = isSupabaseConfigured()
+  const channelRef = useRef<RealtimeChannel | null>(null)
+
+  useEffect(() => {
+    const syncFromLocalStorage = () => {
+      if (typeof window === "undefined") return
+      const localRaw = window.localStorage.getItem(getActivityStorageKey(categoryId))
+      if (!localRaw) return
+      try {
+        const localLogs = JSON.parse(localRaw) as ActivityLog[]
+        setLogs((prev) => {
+          const merged = [...localLogs, ...prev]
+          const deduped = merged.filter(
+            (log, idx, arr) => arr.findIndex((x) => x.id === log.id) === idx
+          )
+          return deduped.slice(0, 50)
+        })
+      } catch {
+        // Ignore malformed local storage
+      }
+    }
+
+    const onLocalActivityUpdated = (event: Event) => {
+      const customEvent = event as CustomEvent<{ categoryId?: string }>
+      if (customEvent.detail?.categoryId === categoryId) {
+        syncFromLocalStorage()
+      }
+    }
+
+    if (typeof window !== "undefined") {
+      window.addEventListener("audit-local-activity-updated", onLocalActivityUpdated)
+    }
+
+    if (!isConfigured) {
+      syncFromLocalStorage()
+      setLoading(false)
+      return () => {
+        if (typeof window !== "undefined") {
+          window.removeEventListener("audit-local-activity-updated", onLocalActivityUpdated)
+        }
+      }
+    }
+
+    const localLogs = loadActivityFromStorage(categoryId)
+    setLogs(localLogs)
+
+    const supabase = createClient()
+    const uniqueId = getUniqueChannelId()
+
+    const fetchLogs = async () => {
+      const { data, error } = await supabase
+        .from("activity_logs")
+        .select("*")
+        .eq("category_id", categoryId)
+        .order("created_at", { ascending: false })
+        .limit(50)
+
+      if (!error && data) {
+        setLogs(mergeActivityById(localLogs, data, 50))
+      }
+      setLoading(false)
+    }
+
+    fetchLogs()
+    syncFromLocalStorage()
+
+    const channel = supabase
+      .channel(`logs-${categoryId}-${uniqueId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "activity_logs",
+          filter: `category_id=eq.${categoryId}`,
+        },
+        (payload) => {
+          if (payload.eventType === "INSERT") {
+            setLogs((prev) => [payload.new as ActivityLog, ...prev].slice(0, 50))
+          } else if (payload.eventType === "DELETE") {
+            setLogs((prev) => prev.filter((log) => log.id !== (payload.old as ActivityLog).id))
+          }
+        }
+      )
+      .subscribe()
+
+    channelRef.current = channel
+
+    return () => {
+      if (channelRef.current) {
+        supabase.removeChannel(channelRef.current)
+        channelRef.current = null
+      }
+      if (typeof window !== "undefined") {
+        window.removeEventListener("audit-local-activity-updated", onLocalActivityUpdated)
+      }
+    }
+  }, [categoryId, isConfigured])
+
+  useEffect(() => {
+    if (typeof window === "undefined" || loading) return
+    window.localStorage.setItem(getActivityStorageKey(categoryId), JSON.stringify(logs))
+  }, [categoryId, logs, loading])
+
+  return { logs, loading }
+}
+
+export function useRealtimeProgress() {
+  const [progressData, setProgressData] = useState<CategoryProgress[]>([])
+  const [loading, setLoading] = useState(true)
+  const isConfigured = isSupabaseConfigured()
+  const channelRef = useRef<RealtimeChannel | null>(null)
+
+  useEffect(() => {
+    if (!isConfigured) {
+      if (typeof window !== "undefined") {
+        setProgressData(loadProgressFromStorage())
+      }
+      setLoading(false)
+      return
+    }
+
+    const localProgress = loadProgressFromStorage()
+    setProgressData(localProgress)
+
+    const supabase = createClient()
+    const uniqueId = getUniqueChannelId()
+
+    const fetchProgress = async () => {
+      const { data, error } = await supabase
+        .from("category_progress")
+        .select("*")
+
+      if (!error && data) {
+        setProgressData(mergeProgressByCategory(localProgress, data))
+      }
+      setLoading(false)
+    }
+
+    fetchProgress()
+
+    const channel = supabase
+      .channel(`progress-all-${uniqueId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "category_progress",
+        },
+        (payload) => {
+          if (payload.eventType === "INSERT") {
+            setProgressData((prev) => [...prev, payload.new as CategoryProgress])
+          } else if (payload.eventType === "UPDATE") {
+            setProgressData((prev) =>
+              prev.map((p) =>
+                p.id === (payload.new as CategoryProgress).id
+                  ? (payload.new as CategoryProgress)
+                  : p
+              )
+            )
+          }
+        }
+      )
+      .subscribe()
+
+    channelRef.current = channel
+
+    return () => {
+      if (channelRef.current) {
+        supabase.removeChannel(channelRef.current)
+        channelRef.current = null
+      }
+    }
+  }, [isConfigured])
+
+  useEffect(() => {
+    if (typeof window === "undefined" || loading) return
+    window.localStorage.setItem(LOCAL_PROGRESS_STORAGE_KEY, JSON.stringify(progressData))
+  }, [progressData, loading])
+
+  const updateProgress = useCallback(
+    async (
+      categoryId: string,
+      status: "not_started" | "in_progress" | "completed",
+      progressPercentage: number,
+      userName: string,
+      logActivity: boolean = true
+    ) => {
+      if (!isConfigured) {
+        const now = new Date().toISOString()
+        setProgressData((prev) => {
+          const existing = prev.find((p) => p.category_id === categoryId)
+          if (existing) {
+            return prev.map((p) =>
+              p.id === existing.id
+                ? {
+                    ...p,
+                    status,
+                    progress_percentage: progressPercentage,
+                    updated_by: userName,
+                    updated_at: now,
+                  }
+                : p
+            )
+          }
+          return [
+            ...prev,
+            {
+              id: `local-progress-${categoryId}`,
+              category_id: categoryId,
+              status,
+              progress_percentage: progressPercentage,
+              updated_by: userName,
+              updated_at: now,
+            },
+          ]
+        })
+        return
+      }
+
+      const supabase = createClient()
+      const existing = progressData.find((p) => p.category_id === categoryId)
+      const now = new Date().toISOString()
+
+      if (existing) {
+        const { error: upErr } = await supabase
+          .from("category_progress")
+          .update({
+            status,
+            progress_percentage: progressPercentage,
+            updated_by: userName,
+            updated_at: now,
+          })
+          .eq("id", existing.id)
+        if (upErr) throw upErr
+        setProgressData((prev) =>
+          prev.map((p) =>
+            p.id === existing.id
+              ? {
+                  ...p,
+                  status,
+                  progress_percentage: progressPercentage,
+                  updated_by: userName,
+                  updated_at: now,
+                }
+              : p
+          )
+        )
+      } else {
+        const { data: newRow, error: insErr } = await supabase
+          .from("category_progress")
+          .insert({
+            category_id: categoryId,
+            status,
+            progress_percentage: progressPercentage,
+            updated_by: userName,
+          })
+          .select()
+          .single()
+        if (insErr) throw insErr
+        if (newRow) {
+          setProgressData((prev) =>
+            mergeProgressByCategory(prev, [newRow as CategoryProgress])
+          )
+        }
+      }
+
+      // Only log activity if explicitly requested (not for auto status changes)
+      if (logActivity) {
+        // Check for recent duplicate log (within last 5 seconds)
+        const fiveSecondsAgo = new Date(Date.now() - 5000).toISOString()
+        const { data: recentLogs } = await supabase
+          .from("activity_logs")
+          .select("id")
+          .eq("category_id", categoryId)
+          .eq("action_type", "progress")
+          .eq("performed_by", userName)
+          .gte("created_at", fiveSecondsAgo)
+          .limit(1)
+
+        if (!recentLogs || recentLogs.length === 0) {
+          await supabase.from("activity_logs").insert({
+            category_id: categoryId,
+            item_id: null,
+            action_type: "progress",
+            action_description: `진행 상태를 "${status === "not_started" ? "시작 전" : status === "in_progress" ? "진행 중" : "완료"}"(${progressPercentage}%)로 변경했습니다`,
+            performed_by: userName,
+          })
+        }
+      }
+    },
+    [progressData, isConfigured]
+  )
+
+  return { progressData, loading, updateProgress }
+}
