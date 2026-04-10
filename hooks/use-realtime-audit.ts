@@ -684,14 +684,21 @@ export function useRealtimeProgress() {
     if (!isConfigured) return
     
     const supabase = createClient()
-    const localProgress = loadProgressFromStorage()
     
     const { data, error } = await supabase
       .from("category_progress")
       .select("*")
 
     if (!error && data) {
-      setProgressData(mergeProgressByCategory(localProgress, data))
+      // Merge with current state (which includes local changes), prioritizing current state
+      setProgressData((prev) => {
+        const merged = new Map<string, CategoryProgress>()
+        // First add remote data
+        for (const p of data) merged.set(p.category_id, p)
+        // Then override with current state (local changes take priority)
+        for (const p of prev) merged.set(p.category_id, p)
+        return Array.from(merged.values())
+      })
     }
   }, [isConfigured])
 
