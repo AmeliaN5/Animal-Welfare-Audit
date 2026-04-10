@@ -43,7 +43,6 @@ import {
   useRealtimeChecklist,
   useRealtimeNotes,
   useRealtimeActivityLog,
-  useRealtimeProgress,
   type Attachment,
   type SharedNote,
 } from "@/hooks/use-realtime-audit"
@@ -63,14 +62,28 @@ const MAX_INLINE_ATTACHMENT_BYTES = 5 * 1024 * 1024
 interface CategoryDetailProps {
   category: Category
   onBack: () => void
+  progressData: Array<{
+    id: string
+    category_id: string
+    status: string
+    progress_percentage: number
+    updated_by: string | null
+    updated_at: string | null
+  }>
+  updateProgress: (
+    categoryId: string,
+    status: string,
+    progressPercentage: number,
+    userName: string,
+    notifyOthers?: boolean
+  ) => Promise<void>
 }
 
-export function CategoryDetail({ category, onBack }: CategoryDetailProps) {
+export function CategoryDetail({ category, onBack, progressData, updateProgress }: CategoryDetailProps) {
   const { userName } = useUser()
   const { checklistItems, toggleItem } = useRealtimeChecklist(category.id)
   const { notes, addNote, updateNote, deleteNote } = useRealtimeNotes(category.id)
   const { logs } = useRealtimeActivityLog(category.id)
-  const { progressData, updateProgress } = useRealtimeProgress()
   const [progressWidth, setProgressWidth] = useState(0)
   const [expandedNoteItem, setExpandedNoteItem] = useState<string | null>(null)
   const [noteContent, setNoteContent] = useState("")
