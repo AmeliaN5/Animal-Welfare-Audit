@@ -192,12 +192,41 @@ export function useRealtimeChecklist(categoryId: string) {
         return
       }
 
+      // Update local state immediately for instant UI feedback
+      const checkedAt = isChecked ? new Date().toISOString() : null
+      setChecklistItems((prev) => {
+        const existingItem = prev.find((item) => item.item_id === itemId)
+        if (existingItem) {
+          return prev.map((item) =>
+            item.item_id === itemId
+              ? {
+                  ...item,
+                  is_checked: isChecked,
+                  checked_by: isChecked ? userName : null,
+                  checked_at: checkedAt,
+                }
+              : item
+          )
+        }
+        return [
+          ...prev,
+          {
+            id: `local-check-${itemId}`,
+            item_id: itemId,
+            category_id: categoryId,
+            is_checked: isChecked,
+            checked_by: isChecked ? userName : null,
+            checked_at: checkedAt,
+            created_at: new Date().toISOString(),
+          },
+        ]
+      })
+
       try {
         const supabase = createClient()
         const existingItem = checklistItems.find((item) => item.item_id === itemId)
-        const checkedAt = isChecked ? new Date().toISOString() : null
 
-        if (existingItem) {
+        if (existingItem && existingItem.id && !existingItem.id.startsWith('local-')) {
           const { error: upErr } = await supabase
             .from("checklist_items")
             .update({
@@ -206,19 +235,9 @@ export function useRealtimeChecklist(categoryId: string) {
               checked_at: checkedAt,
             })
             .eq("id", existingItem.id)
-          if (upErr) throw upErr
-          setChecklistItems((prev) =>
-            prev.map((item) =>
-              item.id === existingItem.id
-                ? {
-                    ...item,
-                    is_checked: isChecked,
-                    checked_by: isChecked ? userName : null,
-                    checked_at: checkedAt,
-                  }
-                : item
-            )
-          )
+          if (upErr) {
+            console.error("[v0] Checklist update error (non-fatal):", upErr)
+          }
         } else {
           const { data: newRow, error: insErr } = await supabase
             .from("checklist_items")
@@ -231,8 +250,9 @@ export function useRealtimeChecklist(categoryId: string) {
             })
             .select()
             .single()
-          if (insErr) throw insErr
-          if (newRow) {
+          if (insErr) {
+            console.error("[v0] Checklist insert error (non-fatal):", insErr)
+          } else if (newRow) {
             setChecklistItems((prev) =>
               mergeChecklistsForCategory(prev, [newRow as ChecklistItem])
             )
@@ -271,28 +291,19 @@ export function useRealtimeChecklist(categoryId: string) {
         
         // Trigger immediate refresh after action
         fetchItems()
-      } catch {
-        setChecklistItems((prev) =>
-          prev.map((item) =>
-            item.item_id === itemId
-              ? {
-                  ...item,
-                  is_checked: isChecked,
-                  checked_by: isChecked ? userName : null,
-                  checked_at: isChecked ? new Date().toISOString() : null,
-                }
-              : item
-          )
-        )
-        if (isChecked) {
-          pushLocalActivityLog(categoryId, {
-            category_id: categoryId,
-            item_id: itemId,
-            action_type: "check",
-            action_description: "항목을 체크했습니다",
-            performed_by: userName,
-          })
-        }
+      } catch (err) {
+        console.error("[v0] Checklist DB error (using local state):", err)
+      }
+
+      // Log activity locally if checked
+      if (isChecked) {
+        pushLocalActivityLog(categoryId, {
+          category_id: categoryId,
+          item_id: itemId,
+          action_type: "check",
+          action_description: "항목을 체크했습니다",
+          performed_by: userName,
+        })
       }
     },
     [categoryId, checklistItems, isConfigured, fetchItems]
@@ -765,54 +776,75 @@ export function useRealtimeProgress() {
       const existing = progressData.find((p) => p.category_id === categoryId)
       const now = new Date().toISOString()
 
-      if (existing && existing.id && !existing.id.startsWith('local-')) {
-        const { error: upErr } = await supabase
-          .from("category_progress")
-          .update({
-            status,
-            progress_percentage: progressPercentage,
-            updated_by: userName,
-            updated_at: now,
-          })
-          .eq("id", existing.id)
-        if (upErr) {
-          console.error("[v0] Progress update error:", upErr)
-          throw upErr
+      // Always update local state first for immediate UI feedback
+      const updateLocalState = () => {
+        setProgressData((prev) => {
+          const existingLocal = prev.find((p) => p.category_id === categoryId)
+          if (existingLocal) {
+            return prev.map((p) =>
+              p.category_id === categoryId
+                ? {
+                    ...p,
+                    status,
+                    progress_percentage: progressPercentage,
+                    updated_by: userName,
+                    updated_at: now,
+                  }
+                : p
+            )
+          }
+          return [
+            ...prev,
+            {
+              id: `local-progress-${categoryId}`,
+              category_id: categoryId,
+              status,
+              progress_percentage: progressPercentage,
+              updated_by: userName,
+              updated_at: now,
+            },
+          ]
+        })
+      }
+
+      // Update local state immediately
+      updateLocalState()
+
+      try {
+        if (existing && existing.id && !existing.id.startsWith('local-')) {
+          const { error: upErr } = await supabase
+            .from("category_progress")
+            .update({
+              status,
+              progress_percentage: progressPercentage,
+              updated_by: userName,
+              updated_at: now,
+            })
+            .eq("id", existing.id)
+          if (upErr) {
+            console.error("[v0] Progress update error (non-fatal):", upErr)
+          }
+        } else {
+          const { data: newRow, error: insErr } = await supabase
+            .from("category_progress")
+            .insert({
+              category_id: categoryId,
+              status,
+              progress_percentage: progressPercentage,
+              updated_by: userName,
+            })
+            .select()
+            .single()
+          if (insErr) {
+            console.error("[v0] Progress insert error (non-fatal):", insErr)
+          } else if (newRow) {
+            setProgressData((prev) =>
+              mergeProgressByCategory(prev, [newRow as CategoryProgress])
+            )
+          }
         }
-        setProgressData((prev) =>
-          prev.map((p) =>
-            p.id === existing.id
-              ? {
-                  ...p,
-                  status,
-                  progress_percentage: progressPercentage,
-                  updated_by: userName,
-                  updated_at: now,
-                }
-              : p
-          )
-        )
-      } else {
-        // Either no existing record, or it's a local record that needs to be created in DB
-        const { data: newRow, error: insErr } = await supabase
-          .from("category_progress")
-          .insert({
-            category_id: categoryId,
-            status,
-            progress_percentage: progressPercentage,
-            updated_by: userName,
-          })
-          .select()
-          .single()
-        if (insErr) {
-          console.error("[v0] Progress insert error:", insErr)
-          throw insErr
-        }
-        if (newRow) {
-          setProgressData((prev) =>
-            mergeProgressByCategory(prev, [newRow as CategoryProgress])
-          )
-        }
+      } catch (err) {
+        console.error("[v0] Progress DB error (using local state):", err)
       }
 
       // Only log activity if explicitly requested (not for auto status changes)
