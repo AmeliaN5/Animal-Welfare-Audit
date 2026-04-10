@@ -4,7 +4,9 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 
 export function isSupabaseConfigured() {
-  return Boolean(supabaseUrl && supabaseAnonKey)
+  const configured = Boolean(supabaseUrl && supabaseAnonKey)
+  console.log("[v0] Supabase configured:", configured, "URL:", supabaseUrl ? "SET" : "NOT SET", "KEY:", supabaseAnonKey ? "SET" : "NOT SET")
+  return configured
 }
 
 export function createClient() {
