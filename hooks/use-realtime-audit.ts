@@ -802,6 +802,7 @@ export function useRealtimeProgress() {
       }
 
       // Update local state immediately
+      console.log("[v0] updateProgress called:", { categoryId, status, progressPercentage })
       updateLocalState()
 
       try {

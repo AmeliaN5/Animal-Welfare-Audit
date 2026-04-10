@@ -55,6 +55,8 @@ export function AuditDashboard() {
   const inProgressCategories = isMounted ? progressData.filter(
     (p) => p.status === "in_progress"
   ).length : 0
+  
+  console.log("[v0] Dashboard progressData:", progressData.map(p => ({ id: p.category_id, status: p.status })))
 
   const completedCategoryList = categories.filter(
     (c) => getCategoryProgress(c.id)?.status === "completed"
