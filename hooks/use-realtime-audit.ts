@@ -2,7 +2,6 @@
 
 import { useEffect, useState, useCallback, useRef } from "react"
 import { createClient, isSupabaseConfigured } from "@/lib/supabase/client"
-import type { RealtimeChannel } from "@supabase/supabase-js"
 import {
   getActivityStorageKey,
   getChecklistStorageKey,
@@ -18,11 +17,8 @@ import {
   mergeProgressByCategory,
 } from "@/lib/audit-local-persistence"
 
-// Generate unique channel ID for each hook instance
-let channelCounter = 0
-function getUniqueChannelId() {
-  return `${Date.now()}-${++channelCounter}`
-}
+// Polling interval in milliseconds (5 seconds)
+const POLLING_INTERVAL = 5000
 
 function pushLocalActivityLog(
   categoryId: string,
@@ -100,8 +96,23 @@ export function useRealtimeChecklist(categoryId: string) {
   const [checklistItems, setChecklistItems] = useState<ChecklistItem[]>([])
   const [loading, setLoading] = useState(true)
   const isConfigured = isSupabaseConfigured()
-  const channelRef = useRef<RealtimeChannel | null>(null)
-  const channelIdRef = useRef<string>("")
+  const pollingRef = useRef<NodeJS.Timeout | null>(null)
+
+  const fetchItems = useCallback(async () => {
+    if (!isConfigured) return
+    
+    const supabase = createClient()
+    const localRows = loadChecklistFromStorage(categoryId)
+    
+    const { data, error } = await supabase
+      .from("checklist_items")
+      .select("*")
+      .eq("category_id", categoryId)
+
+    if (!error && data) {
+      setChecklistItems(mergeChecklistsForCategory(localRows, data))
+    }
+  }, [categoryId, isConfigured])
 
   useEffect(() => {
     if (!isConfigured) {
@@ -116,63 +127,19 @@ export function useRealtimeChecklist(categoryId: string) {
     const localRows = loadChecklistFromStorage(categoryId)
     setChecklistItems(localRows)
 
-    const supabase = createClient()
-    const uniqueId = getUniqueChannelId()
-    channelIdRef.current = uniqueId
+    // Initial fetch
+    fetchItems().then(() => setLoading(false))
 
-    const fetchItems = async () => {
-      const { data, error } = await supabase
-        .from("checklist_items")
-        .select("*")
-        .eq("category_id", categoryId)
-
-      if (!error && data) {
-        setChecklistItems(mergeChecklistsForCategory(localRows, data))
-      }
-      setLoading(false)
-    }
-
-    fetchItems()
-
-    const channel = supabase
-      .channel(`checklist-${categoryId}-${uniqueId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "checklist_items",
-          filter: `category_id=eq.${categoryId}`,
-        },
-        (payload) => {
-          if (payload.eventType === "INSERT") {
-            setChecklistItems((prev) => [...prev, payload.new as ChecklistItem])
-          } else if (payload.eventType === "UPDATE") {
-            setChecklistItems((prev) =>
-              prev.map((item) =>
-                item.id === (payload.new as ChecklistItem).id
-                  ? (payload.new as ChecklistItem)
-                  : item
-              )
-            )
-          } else if (payload.eventType === "DELETE") {
-            setChecklistItems((prev) =>
-              prev.filter((item) => item.id !== (payload.old as ChecklistItem).id)
-            )
-          }
-        }
-      )
-      .subscribe()
-
-    channelRef.current = channel
+    // Start polling for real-time updates
+    pollingRef.current = setInterval(fetchItems, POLLING_INTERVAL)
 
     return () => {
-      if (channelRef.current) {
-        supabase.removeChannel(channelRef.current)
-        channelRef.current = null
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current)
+        pollingRef.current = null
       }
     }
-  }, [categoryId, isConfigured])
+  }, [categoryId, isConfigured, fetchItems])
 
   useEffect(() => {
     if (typeof window === "undefined" || loading) return
@@ -301,6 +268,9 @@ export function useRealtimeChecklist(categoryId: string) {
             .eq("item_id", itemId)
             .in("action_type", ["check", "uncheck"])
         }
+        
+        // Trigger immediate refresh after action
+        fetchItems()
       } catch {
         setChecklistItems((prev) =>
           prev.map((item) =>
@@ -325,17 +295,34 @@ export function useRealtimeChecklist(categoryId: string) {
         }
       }
     },
-    [categoryId, checklistItems, isConfigured]
+    [categoryId, checklistItems, isConfigured, fetchItems]
   )
 
-  return { checklistItems, loading, toggleItem }
+  return { checklistItems, loading, toggleItem, refetch: fetchItems }
 }
 
 export function useRealtimeNotes(categoryId: string) {
   const [notes, setNotes] = useState<SharedNote[]>([])
   const [loading, setLoading] = useState(true)
   const isConfigured = isSupabaseConfigured()
-  const channelRef = useRef<RealtimeChannel | null>(null)
+  const pollingRef = useRef<NodeJS.Timeout | null>(null)
+
+  const fetchNotes = useCallback(async () => {
+    if (!isConfigured) return
+    
+    const supabase = createClient()
+    const localNotes = loadNotesFromStorage(categoryId)
+    
+    const { data, error } = await supabase
+      .from("shared_notes")
+      .select("*")
+      .eq("category_id", categoryId)
+      .order("created_at", { ascending: false })
+
+    if (!error && data) {
+      setNotes(mergeNotesById(localNotes, data))
+    }
+  }, [categoryId, isConfigured])
 
   useEffect(() => {
     if (!isConfigured) {
@@ -349,63 +336,19 @@ export function useRealtimeNotes(categoryId: string) {
     const localNotes = loadNotesFromStorage(categoryId)
     setNotes(localNotes)
 
-    const supabase = createClient()
-    const uniqueId = getUniqueChannelId()
+    // Initial fetch
+    fetchNotes().then(() => setLoading(false))
 
-    const fetchNotes = async () => {
-      const { data, error } = await supabase
-        .from("shared_notes")
-        .select("*")
-        .eq("category_id", categoryId)
-        .order("created_at", { ascending: false })
-
-      if (!error && data) {
-        setNotes(mergeNotesById(localNotes, data))
-      }
-      setLoading(false)
-    }
-
-    fetchNotes()
-
-    const channel = supabase
-      .channel(`notes-${categoryId}-${uniqueId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "shared_notes",
-          filter: `category_id=eq.${categoryId}`,
-        },
-        (payload) => {
-          if (payload.eventType === "INSERT") {
-            setNotes((prev) => [payload.new as SharedNote, ...prev])
-          } else if (payload.eventType === "UPDATE") {
-            setNotes((prev) =>
-              prev.map((note) =>
-                note.id === (payload.new as SharedNote).id
-                  ? (payload.new as SharedNote)
-                  : note
-              )
-            )
-          } else if (payload.eventType === "DELETE") {
-            setNotes((prev) =>
-              prev.filter((note) => note.id !== (payload.old as SharedNote).id)
-            )
-          }
-        }
-      )
-      .subscribe()
-
-    channelRef.current = channel
+    // Start polling for real-time updates
+    pollingRef.current = setInterval(fetchNotes, POLLING_INTERVAL)
 
     return () => {
-      if (channelRef.current) {
-        supabase.removeChannel(channelRef.current)
-        channelRef.current = null
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current)
+        pollingRef.current = null
       }
     }
-  }, [categoryId, isConfigured])
+  }, [categoryId, isConfigured, fetchNotes])
 
   useEffect(() => {
     if (typeof window === "undefined" || loading) return
@@ -481,6 +424,9 @@ export function useRealtimeNotes(categoryId: string) {
             performed_by: authorName,
           })
         }
+        
+        // Trigger immediate refresh after action
+        fetchNotes()
       } catch {
         const now = new Date().toISOString()
         setNotes((prev) => [
@@ -505,7 +451,7 @@ export function useRealtimeNotes(categoryId: string) {
         })
       }
     },
-    [categoryId, isConfigured]
+    [categoryId, isConfigured, fetchNotes]
   )
 
   const updateNote = useCallback(
@@ -588,11 +534,14 @@ export function useRealtimeNotes(categoryId: string) {
             performed_by: authorName,
           })
         }
+        
+        // Trigger immediate refresh after action
+        fetchNotes()
       } catch {
         applyLocal()
       }
     },
-    [categoryId, isConfigured, notes]
+    [categoryId, isConfigured, notes, fetchNotes]
   )
 
   const deleteNote = useCallback(
@@ -617,18 +566,39 @@ export function useRealtimeNotes(categoryId: string) {
           .eq("item_id", note.item_id)
           .in("action_type", ["note", "note_edit", "note_delete"])
       }
+      
+      // Trigger immediate refresh after action
+      fetchNotes()
     },
-    [categoryId, isConfigured, notes]
+    [categoryId, isConfigured, notes, fetchNotes]
   )
 
-  return { notes, loading, addNote, updateNote, deleteNote }
+  return { notes, loading, addNote, updateNote, deleteNote, refetch: fetchNotes }
 }
 
 export function useRealtimeActivityLog(categoryId: string) {
   const [logs, setLogs] = useState<ActivityLog[]>([])
   const [loading, setLoading] = useState(true)
   const isConfigured = isSupabaseConfigured()
-  const channelRef = useRef<RealtimeChannel | null>(null)
+  const pollingRef = useRef<NodeJS.Timeout | null>(null)
+
+  const fetchLogs = useCallback(async () => {
+    if (!isConfigured) return
+    
+    const supabase = createClient()
+    const localLogs = loadActivityFromStorage(categoryId)
+    
+    const { data, error } = await supabase
+      .from("activity_logs")
+      .select("*")
+      .eq("category_id", categoryId)
+      .order("created_at", { ascending: false })
+      .limit(50)
+
+    if (!error && data) {
+      setLogs(mergeActivityById(localLogs, data, 50))
+    }
+  }, [categoryId, isConfigured])
 
   useEffect(() => {
     const syncFromLocalStorage = () => {
@@ -673,72 +643,52 @@ export function useRealtimeActivityLog(categoryId: string) {
     const localLogs = loadActivityFromStorage(categoryId)
     setLogs(localLogs)
 
-    const supabase = createClient()
-    const uniqueId = getUniqueChannelId()
-
-    const fetchLogs = async () => {
-      const { data, error } = await supabase
-        .from("activity_logs")
-        .select("*")
-        .eq("category_id", categoryId)
-        .order("created_at", { ascending: false })
-        .limit(50)
-
-      if (!error && data) {
-        setLogs(mergeActivityById(localLogs, data, 50))
-      }
-      setLoading(false)
-    }
-
-    fetchLogs()
+    // Initial fetch
+    fetchLogs().then(() => setLoading(false))
     syncFromLocalStorage()
 
-    const channel = supabase
-      .channel(`logs-${categoryId}-${uniqueId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "activity_logs",
-          filter: `category_id=eq.${categoryId}`,
-        },
-        (payload) => {
-          if (payload.eventType === "INSERT") {
-            setLogs((prev) => [payload.new as ActivityLog, ...prev].slice(0, 50))
-          } else if (payload.eventType === "DELETE") {
-            setLogs((prev) => prev.filter((log) => log.id !== (payload.old as ActivityLog).id))
-          }
-        }
-      )
-      .subscribe()
-
-    channelRef.current = channel
+    // Start polling for real-time updates
+    pollingRef.current = setInterval(fetchLogs, POLLING_INTERVAL)
 
     return () => {
-      if (channelRef.current) {
-        supabase.removeChannel(channelRef.current)
-        channelRef.current = null
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current)
+        pollingRef.current = null
       }
       if (typeof window !== "undefined") {
         window.removeEventListener("audit-local-activity-updated", onLocalActivityUpdated)
       }
     }
-  }, [categoryId, isConfigured])
+  }, [categoryId, isConfigured, fetchLogs])
 
   useEffect(() => {
     if (typeof window === "undefined" || loading) return
     window.localStorage.setItem(getActivityStorageKey(categoryId), JSON.stringify(logs))
   }, [categoryId, logs, loading])
 
-  return { logs, loading }
+  return { logs, loading, refetch: fetchLogs }
 }
 
 export function useRealtimeProgress() {
   const [progressData, setProgressData] = useState<CategoryProgress[]>([])
   const [loading, setLoading] = useState(true)
   const isConfigured = isSupabaseConfigured()
-  const channelRef = useRef<RealtimeChannel | null>(null)
+  const pollingRef = useRef<NodeJS.Timeout | null>(null)
+
+  const fetchProgress = useCallback(async () => {
+    if (!isConfigured) return
+    
+    const supabase = createClient()
+    const localProgress = loadProgressFromStorage()
+    
+    const { data, error } = await supabase
+      .from("category_progress")
+      .select("*")
+
+    if (!error && data) {
+      setProgressData(mergeProgressByCategory(localProgress, data))
+    }
+  }, [isConfigured])
 
   useEffect(() => {
     if (!isConfigured) {
@@ -752,56 +702,19 @@ export function useRealtimeProgress() {
     const localProgress = loadProgressFromStorage()
     setProgressData(localProgress)
 
-    const supabase = createClient()
-    const uniqueId = getUniqueChannelId()
+    // Initial fetch
+    fetchProgress().then(() => setLoading(false))
 
-    const fetchProgress = async () => {
-      const { data, error } = await supabase
-        .from("category_progress")
-        .select("*")
-
-      if (!error && data) {
-        setProgressData(mergeProgressByCategory(localProgress, data))
-      }
-      setLoading(false)
-    }
-
-    fetchProgress()
-
-    const channel = supabase
-      .channel(`progress-all-${uniqueId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "category_progress",
-        },
-        (payload) => {
-          if (payload.eventType === "INSERT") {
-            setProgressData((prev) => [...prev, payload.new as CategoryProgress])
-          } else if (payload.eventType === "UPDATE") {
-            setProgressData((prev) =>
-              prev.map((p) =>
-                p.id === (payload.new as CategoryProgress).id
-                  ? (payload.new as CategoryProgress)
-                  : p
-              )
-            )
-          }
-        }
-      )
-      .subscribe()
-
-    channelRef.current = channel
+    // Start polling for real-time updates
+    pollingRef.current = setInterval(fetchProgress, POLLING_INTERVAL)
 
     return () => {
-      if (channelRef.current) {
-        supabase.removeChannel(channelRef.current)
-        channelRef.current = null
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current)
+        pollingRef.current = null
       }
     }
-  }, [isConfigured])
+  }, [isConfigured, fetchProgress])
 
   useEffect(() => {
     if (typeof window === "undefined" || loading) return
@@ -918,9 +831,12 @@ export function useRealtimeProgress() {
           })
         }
       }
+      
+      // Trigger immediate refresh after action
+      fetchProgress()
     },
-    [progressData, isConfigured]
+    [progressData, isConfigured, fetchProgress]
   )
 
-  return { progressData, loading, updateProgress }
+  return { progressData, loading, updateProgress, refetch: fetchProgress }
 }
