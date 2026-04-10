@@ -239,7 +239,7 @@ export function useRealtimeChecklist(categoryId: string) {
             console.error("[v0] Checklist update error (non-fatal):", upErr)
           }
         } else {
-          const { data: newRow, error: insErr } = await supabase
+          const { error: insErr } = await supabase
             .from("checklist_items")
             .insert({
               item_id: itemId,
@@ -248,14 +248,8 @@ export function useRealtimeChecklist(categoryId: string) {
               checked_by: isChecked ? userName : null,
               checked_at: checkedAt,
             })
-            .select()
-            .single()
           if (insErr) {
             console.error("[v0] Checklist insert error (non-fatal):", insErr)
-          } else if (newRow) {
-            setChecklistItems((prev) =>
-              mergeChecklistsForCategory(prev, [newRow as ChecklistItem])
-            )
           }
         }
 
@@ -825,7 +819,7 @@ export function useRealtimeProgress() {
             console.error("[v0] Progress update error (non-fatal):", upErr)
           }
         } else {
-          const { data: newRow, error: insErr } = await supabase
+          const { error: insErr } = await supabase
             .from("category_progress")
             .insert({
               category_id: categoryId,
@@ -833,14 +827,8 @@ export function useRealtimeProgress() {
               progress_percentage: progressPercentage,
               updated_by: userName,
             })
-            .select()
-            .single()
           if (insErr) {
             console.error("[v0] Progress insert error (non-fatal):", insErr)
-          } else if (newRow) {
-            setProgressData((prev) =>
-              mergeProgressByCategory(prev, [newRow as CategoryProgress])
-            )
           }
         }
       } catch (err) {
