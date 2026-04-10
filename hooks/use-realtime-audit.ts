@@ -192,12 +192,41 @@ export function useRealtimeChecklist(categoryId: string) {
         return
       }
 
+      // Update local state immediately for instant UI feedback
+      const checkedAt = isChecked ? new Date().toISOString() : null
+      setChecklistItems((prev) => {
+        const existingItem = prev.find((item) => item.item_id === itemId)
+        if (existingItem) {
+          return prev.map((item) =>
+            item.item_id === itemId
+              ? {
+                  ...item,
+                  is_checked: isChecked,
+                  checked_by: isChecked ? userName : null,
+                  checked_at: checkedAt,
+                }
+              : item
+          )
+        }
+        return [
+          ...prev,
+          {
+            id: `local-check-${itemId}`,
+            item_id: itemId,
+            category_id: categoryId,
+            is_checked: isChecked,
+            checked_by: isChecked ? userName : null,
+            checked_at: checkedAt,
+            created_at: new Date().toISOString(),
+          },
+        ]
+      })
+
       try {
         const supabase = createClient()
         const existingItem = checklistItems.find((item) => item.item_id === itemId)
-        const checkedAt = isChecked ? new Date().toISOString() : null
 
-        if (existingItem) {
+        if (existingItem && existingItem.id && !existingItem.id.startsWith('local-')) {
           const { error: upErr } = await supabase
             .from("checklist_items")
             .update({
@@ -206,21 +235,11 @@ export function useRealtimeChecklist(categoryId: string) {
               checked_at: checkedAt,
             })
             .eq("id", existingItem.id)
-          if (upErr) throw upErr
-          setChecklistItems((prev) =>
-            prev.map((item) =>
-              item.id === existingItem.id
-                ? {
-                    ...item,
-                    is_checked: isChecked,
-                    checked_by: isChecked ? userName : null,
-                    checked_at: checkedAt,
-                  }
-                : item
-            )
-          )
+          if (upErr) {
+            // Silently ignore - local state is already updated
+          }
         } else {
-          const { data: newRow, error: insErr } = await supabase
+          const { error: insErr } = await supabase
             .from("checklist_items")
             .insert({
               item_id: itemId,
@@ -229,13 +248,8 @@ export function useRealtimeChecklist(categoryId: string) {
               checked_by: isChecked ? userName : null,
               checked_at: checkedAt,
             })
-            .select()
-            .single()
-          if (insErr) throw insErr
-          if (newRow) {
-            setChecklistItems((prev) =>
-              mergeChecklistsForCategory(prev, [newRow as ChecklistItem])
-            )
+          if (insErr) {
+            // Silently ignore - local state is already updated
           }
         }
 
@@ -272,27 +286,18 @@ export function useRealtimeChecklist(categoryId: string) {
         // Trigger immediate refresh after action
         fetchItems()
       } catch {
-        setChecklistItems((prev) =>
-          prev.map((item) =>
-            item.item_id === itemId
-              ? {
-                  ...item,
-                  is_checked: isChecked,
-                  checked_by: isChecked ? userName : null,
-                  checked_at: isChecked ? new Date().toISOString() : null,
-                }
-              : item
-          )
-        )
-        if (isChecked) {
-          pushLocalActivityLog(categoryId, {
-            category_id: categoryId,
-            item_id: itemId,
-            action_type: "check",
-            action_description: "항목을 체크했습니다",
-            performed_by: userName,
-          })
-        }
+        // Silently ignore - local state is already updated
+      }
+
+      // Log activity locally if checked
+      if (isChecked) {
+        pushLocalActivityLog(categoryId, {
+          category_id: categoryId,
+          item_id: itemId,
+          action_type: "check",
+          action_description: "항목을 체크했습니다",
+          performed_by: userName,
+        })
       }
     },
     [categoryId, checklistItems, isConfigured, fetchItems]
@@ -679,14 +684,21 @@ export function useRealtimeProgress() {
     if (!isConfigured) return
     
     const supabase = createClient()
-    const localProgress = loadProgressFromStorage()
     
     const { data, error } = await supabase
       .from("category_progress")
       .select("*")
 
     if (!error && data) {
-      setProgressData(mergeProgressByCategory(localProgress, data))
+      // Merge with current state (which includes local changes), prioritizing current state
+      setProgressData((prev) => {
+        const merged = new Map<string, CategoryProgress>()
+        // First add remote data
+        for (const p of data) merged.set(p.category_id, p)
+        // Then override with current state (local changes take priority)
+        for (const p of prev) merged.set(p.category_id, p)
+        return Array.from(merged.values())
+      })
     }
   }, [isConfigured])
 
@@ -765,47 +777,69 @@ export function useRealtimeProgress() {
       const existing = progressData.find((p) => p.category_id === categoryId)
       const now = new Date().toISOString()
 
-      if (existing) {
-        const { error: upErr } = await supabase
-          .from("category_progress")
-          .update({
-            status,
-            progress_percentage: progressPercentage,
-            updated_by: userName,
-            updated_at: now,
-          })
-          .eq("id", existing.id)
-        if (upErr) throw upErr
-        setProgressData((prev) =>
-          prev.map((p) =>
-            p.id === existing.id
-              ? {
-                  ...p,
-                  status,
-                  progress_percentage: progressPercentage,
-                  updated_by: userName,
-                  updated_at: now,
-                }
-              : p
-          )
-        )
-      } else {
-        const { data: newRow, error: insErr } = await supabase
-          .from("category_progress")
-          .insert({
-            category_id: categoryId,
-            status,
-            progress_percentage: progressPercentage,
-            updated_by: userName,
-          })
-          .select()
-          .single()
-        if (insErr) throw insErr
-        if (newRow) {
-          setProgressData((prev) =>
-            mergeProgressByCategory(prev, [newRow as CategoryProgress])
-          )
+      // Always update local state first for immediate UI feedback
+      const updateLocalState = () => {
+        setProgressData((prev) => {
+          const existingLocal = prev.find((p) => p.category_id === categoryId)
+          if (existingLocal) {
+            return prev.map((p) =>
+              p.category_id === categoryId
+                ? {
+                    ...p,
+                    status,
+                    progress_percentage: progressPercentage,
+                    updated_by: userName,
+                    updated_at: now,
+                  }
+                : p
+            )
+          }
+          return [
+            ...prev,
+            {
+              id: `local-progress-${categoryId}`,
+              category_id: categoryId,
+              status,
+              progress_percentage: progressPercentage,
+              updated_by: userName,
+              updated_at: now,
+            },
+          ]
+        })
+      }
+
+      // Update local state immediately
+      updateLocalState()
+
+      try {
+        if (existing && existing.id && !existing.id.startsWith('local-')) {
+          const { error: upErr } = await supabase
+            .from("category_progress")
+            .update({
+              status,
+              progress_percentage: progressPercentage,
+              updated_by: userName,
+              updated_at: now,
+            })
+            .eq("id", existing.id)
+          if (upErr) {
+            // Silently ignore - local state is already updated
+          }
+        } else {
+          const { error: insErr } = await supabase
+            .from("category_progress")
+            .insert({
+              category_id: categoryId,
+              status,
+              progress_percentage: progressPercentage,
+              updated_by: userName,
+            })
+          if (insErr) {
+            // Silently ignore - local state is already updated
+          }
         }
+      } catch {
+        // Silently ignore - local state is already updated
       }
 
       // Only log activity if explicitly requested (not for auto status changes)
