@@ -1,3 +1,7 @@
+-- DEPRECATED: legacy schema. For new projects run ONLY:
+--   scripts/001_create_tables.sql → 002_fix_columns.sql → 003_add_attachments.sql
+-- Do NOT run this file.
+
 -- 체크리스트 상태 테이블
 CREATE TABLE IF NOT EXISTS checklist_items (
   id TEXT PRIMARY KEY,

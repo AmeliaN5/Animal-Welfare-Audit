@@ -57,6 +57,9 @@ import {
 import { Dialog, DialogContent } from "@/components/ui/dialog"
 import { toast } from "sonner"
 
+/** Blob 업로드가 없거나 실패할 때 DB에 넣는 data URL 상한 (행 크기 과다 방지) */
+const MAX_INLINE_ATTACHMENT_BYTES = 5 * 1024 * 1024
+
 interface CategoryDetailProps {
   category: Category
   onBack: () => void
@@ -142,51 +145,55 @@ export function CategoryDetail({ category, onBack }: CategoryDetailProps) {
 
   const processFilesToAttachments = async (files: File[]): Promise<Attachment[]> => {
     if (files.length === 0) return []
-    let uploadedAttachments: Attachment[] = []
+    const out: Attachment[] = []
+    setIsUploading(true)
     try {
-      uploadedAttachments = await Promise.all(
-        files.map(async (file) => ({
-          url: await fileToDataUrl(file),
+      for (const file of files) {
+        let url: string | null = null
+
+        if (isBackendReady) {
+          try {
+            const formData = new FormData()
+            formData.append("file", file)
+            const response = await fetch("/api/upload", {
+              method: "POST",
+              body: formData,
+            })
+            if (response.ok) {
+              const data = (await response.json()) as { url?: string }
+              if (data.url) url = data.url
+            }
+          } catch {
+            /* Blob 미설정·네트워크 오류 → 아래에서 data URL 시도 */
+          }
+        }
+
+        if (!url) {
+          if (file.size > MAX_INLINE_ATTACHMENT_BYTES) {
+            toast.error(
+              `"${file.name}"은(는) 5MB를 넘습니다. Vercel Blob을 켜거나 더 작은 파일로 올려주세요.`
+            )
+            continue
+          }
+          try {
+            url = await fileToDataUrl(file)
+          } catch {
+            toast.error(`"${file.name}"을(를) 읽지 못했습니다.`)
+            continue
+          }
+        }
+
+        out.push({
+          url,
           name: file.name,
           type: file.type || guessMimeFromName(file.name),
           size: file.size,
-        }))
-      )
-    } catch (error) {
-      console.error("Local file conversion error:", error)
-    }
-    if (isBackendReady && files.length > 0) {
-      setIsUploading(true)
-      try {
-        const remoteAttachments: Attachment[] = []
-        for (let i = 0; i < files.length; i++) {
-          const file = files[i]
-          const formData = new FormData()
-          formData.append("file", file)
-          const response = await fetch("/api/upload", {
-            method: "POST",
-            body: formData,
-          })
-          if (response.ok) {
-            const data = await response.json()
-            remoteAttachments.push({
-              url: data.url,
-              name: file.name,
-              type: file.type || guessMimeFromName(file.name),
-              size: file.size,
-            })
-          }
-        }
-        if (remoteAttachments.length === files.length) {
-          uploadedAttachments = remoteAttachments
-        }
-      } catch (error) {
-        console.error("Upload error:", error)
-      } finally {
-        setIsUploading(false)
+        })
       }
+    } finally {
+      setIsUploading(false)
     }
-    return uploadedAttachments
+    return out
   }
 
   const handleAddNote = async (itemId: string) => {
@@ -197,6 +204,11 @@ export function CategoryDetail({ category, onBack }: CategoryDetailProps) {
     try {
       const uploadedAttachments =
         pendingFiles.length > 0 ? await processFilesToAttachments(pendingFiles) : []
+
+      if (pendingFiles.length > 0 && uploadedAttachments.length === 0) {
+        toast.error("첨부가 저장되지 않았습니다. 파일 크기(5MB 이하)를 확인해 주세요.")
+        return
+      }
 
       await addNote(
         itemId,
@@ -296,6 +308,9 @@ export function CategoryDetail({ category, onBack }: CategoryDetailProps) {
       let merged = [...editAttachments]
       if (editPendingFiles.length > 0) {
         const extra = await processFilesToAttachments(editPendingFiles)
+        if (extra.length < editPendingFiles.length) {
+          toast.info("일부 첨부만 저장되었거나 크기 제한으로 빠졌을 수 있어요.")
+        }
         merged = [...merged, ...extra]
       }
       await updateNote(

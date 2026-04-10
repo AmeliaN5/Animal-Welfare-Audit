@@ -18,7 +18,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { User } from "lucide-react"
-
+import { BackupModal } from "@/components/backup-modal"
 type StatDetailKind = "categories" | "total" | "completed" | "in_progress" | null
 
 export function AuditDashboard() {
@@ -266,6 +266,7 @@ export function AuditDashboard() {
             <div className="mb-6 flex flex-wrap justify-center gap-3 animate-in fade-in slide-in-from-bottom-4 duration-500 delay-500">
               <DocumentsModal />
               <ReportModal />
+              <BackupModal />
             </div>
 
             {/* Footer */}
