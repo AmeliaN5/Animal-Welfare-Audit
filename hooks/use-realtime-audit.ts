@@ -765,7 +765,7 @@ export function useRealtimeProgress() {
       const existing = progressData.find((p) => p.category_id === categoryId)
       const now = new Date().toISOString()
 
-      if (existing) {
+      if (existing && existing.id && !existing.id.startsWith('local-')) {
         const { error: upErr } = await supabase
           .from("category_progress")
           .update({
@@ -775,7 +775,10 @@ export function useRealtimeProgress() {
             updated_at: now,
           })
           .eq("id", existing.id)
-        if (upErr) throw upErr
+        if (upErr) {
+          console.error("[v0] Progress update error:", upErr)
+          throw upErr
+        }
         setProgressData((prev) =>
           prev.map((p) =>
             p.id === existing.id
@@ -790,6 +793,7 @@ export function useRealtimeProgress() {
           )
         )
       } else {
+        // Either no existing record, or it's a local record that needs to be created in DB
         const { data: newRow, error: insErr } = await supabase
           .from("category_progress")
           .insert({
@@ -800,7 +804,10 @@ export function useRealtimeProgress() {
           })
           .select()
           .single()
-        if (insErr) throw insErr
+        if (insErr) {
+          console.error("[v0] Progress insert error:", insErr)
+          throw insErr
+        }
         if (newRow) {
           setProgressData((prev) =>
             mergeProgressByCategory(prev, [newRow as CategoryProgress])
