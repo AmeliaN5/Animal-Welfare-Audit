@@ -236,7 +236,7 @@ export function useRealtimeChecklist(categoryId: string) {
             })
             .eq("id", existingItem.id)
           if (upErr) {
-            console.error("[v0] Checklist update error (non-fatal):", upErr)
+            // Silently ignore - local state is already updated
           }
         } else {
           const { error: insErr } = await supabase
@@ -249,7 +249,7 @@ export function useRealtimeChecklist(categoryId: string) {
               checked_at: checkedAt,
             })
           if (insErr) {
-            console.error("[v0] Checklist insert error (non-fatal):", insErr)
+            // Silently ignore - local state is already updated
           }
         }
 
@@ -285,8 +285,8 @@ export function useRealtimeChecklist(categoryId: string) {
         
         // Trigger immediate refresh after action
         fetchItems()
-      } catch (err) {
-        console.error("[v0] Checklist DB error (using local state):", err)
+      } catch {
+        // Silently ignore - local state is already updated
       }
 
       // Log activity locally if checked
@@ -809,7 +809,6 @@ export function useRealtimeProgress() {
       }
 
       // Update local state immediately
-      console.log("[v0] updateProgress called:", { categoryId, status, progressPercentage })
       updateLocalState()
 
       try {
@@ -824,7 +823,7 @@ export function useRealtimeProgress() {
             })
             .eq("id", existing.id)
           if (upErr) {
-            console.error("[v0] Progress update error (non-fatal):", upErr)
+            // Silently ignore - local state is already updated
           }
         } else {
           const { error: insErr } = await supabase
@@ -836,11 +835,11 @@ export function useRealtimeProgress() {
               updated_by: userName,
             })
           if (insErr) {
-            console.error("[v0] Progress insert error (non-fatal):", insErr)
+            // Silently ignore - local state is already updated
           }
         }
-      } catch (err) {
-        console.error("[v0] Progress DB error (using local state):", err)
+      } catch {
+        // Silently ignore - local state is already updated
       }
 
       // Only log activity if explicitly requested (not for auto status changes)
