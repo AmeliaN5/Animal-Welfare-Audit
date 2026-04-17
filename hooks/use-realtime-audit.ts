@@ -359,6 +359,9 @@ export function useRealtimeNotes(categoryId: string) {
         .eq("category_id", categoryId)
         .order("created_at", { ascending: false })
 
+      if (error) {
+        console.error("[Welfare Audit] 메모 로딩 실패:", error.message)
+      }
       if (!error && data) {
         setNotes(mergeNotesById(localNotes, data))
       }
