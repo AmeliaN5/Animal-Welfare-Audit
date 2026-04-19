@@ -353,17 +353,21 @@ export function useRealtimeNotes(categoryId: string) {
     const uniqueId = getUniqueChannelId()
 
     const fetchNotes = async () => {
+      console.log("[v0] fetchNotes 시작 - categoryId:", categoryId)
       const { data, error } = await supabase
         .from("shared_notes")
         .select("*")
         .eq("category_id", categoryId)
         .order("created_at", { ascending: false })
 
+      console.log("[v0] fetchNotes 결과 - data:", data?.length ?? 0, "개, error:", error?.message ?? "없음")
       if (error) {
         console.error("[Welfare Audit] 메모 로딩 실패:", error.message)
       }
       if (!error && data) {
-        setNotes(mergeNotesById(localNotes, data))
+        const merged = mergeNotesById(localNotes, data)
+        console.log("[v0] 병합 후 메모 수:", merged.length)
+        setNotes(merged)
       }
       setLoading(false)
     }
