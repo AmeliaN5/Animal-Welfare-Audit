@@ -444,7 +444,8 @@ export function useRealtimeNotes(categoryId: string) {
         
         // Trigger immediate refresh after action
         fetchNotes()
-      } catch {
+      } catch (err) {
+        console.error("[v0] addNote error:", err)
         const now = new Date().toISOString()
         setNotes((prev) => [
           {
