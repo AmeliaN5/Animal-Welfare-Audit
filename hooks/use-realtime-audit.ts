@@ -342,7 +342,6 @@ export function useRealtimeNotes(categoryId: string) {
     setNotes(localNotes)
 
     const supabase = createClient()
-    const uniqueId = getUniqueChannelId()
 
     const fetchNotes = async () => {
       const { data, error } = await supabase
