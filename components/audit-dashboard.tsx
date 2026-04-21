@@ -27,7 +27,7 @@ export function AuditDashboard() {
   )
   const [statDetail, setStatDetail] = useState<StatDetailKind>(null)
   const [isMounted, setIsMounted] = useState(false)
-  const { progressData } = useRealtimeProgress()
+  const { progressData, updateProgress } = useRealtimeProgress()
   const { userName, isNameSet, resetName } = useUser()
 
   useEffect(() => {
@@ -147,6 +147,8 @@ export function AuditDashboard() {
             <CategoryDetail
               category={selectedCategory}
               onBack={() => setSelectedCategory(null)}
+              progressData={progressData}
+              updateProgress={updateProgress}
             />
           </div>
         ) : (

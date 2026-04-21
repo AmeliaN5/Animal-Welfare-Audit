@@ -43,7 +43,6 @@ import {
   useRealtimeChecklist,
   useRealtimeNotes,
   useRealtimeActivityLog,
-  useRealtimeProgress,
   type Attachment,
   type SharedNote,
 } from "@/hooks/use-realtime-audit"
@@ -63,14 +62,28 @@ const MAX_INLINE_ATTACHMENT_BYTES = 5 * 1024 * 1024
 interface CategoryDetailProps {
   category: Category
   onBack: () => void
+  progressData: Array<{
+    id: string
+    category_id: string
+    status: string
+    progress_percentage: number
+    updated_by: string | null
+    updated_at: string | null
+  }>
+  updateProgress: (
+    categoryId: string,
+    status: string,
+    progressPercentage: number,
+    userName: string,
+    notifyOthers?: boolean
+  ) => Promise<void>
 }
 
-export function CategoryDetail({ category, onBack }: CategoryDetailProps) {
+export function CategoryDetail({ category, onBack, progressData, updateProgress }: CategoryDetailProps) {
   const { userName } = useUser()
   const { checklistItems, toggleItem } = useRealtimeChecklist(category.id)
   const { notes, addNote, updateNote, deleteNote } = useRealtimeNotes(category.id)
   const { logs } = useRealtimeActivityLog(category.id)
-  const { progressData, updateProgress } = useRealtimeProgress()
   const [progressWidth, setProgressWidth] = useState(0)
   const [expandedNoteItem, setExpandedNoteItem] = useState<string | null>(null)
   const [noteContent, setNoteContent] = useState("")
@@ -106,9 +119,23 @@ export function CategoryDetail({ category, onBack }: CategoryDetailProps) {
   const handleToggle = async (itemId: string) => {
     try {
       const isCurrentlyChecked = getItemChecked(itemId)
-      await toggleItem(itemId, !isCurrentlyChecked, userName)
-      if (currentStatus === "not_started") {
-        await updateProgress(category.id, "in_progress", progressPercent, userName, false)
+      const willBeChecked = !isCurrentlyChecked
+      await toggleItem(itemId, willBeChecked, userName)
+      
+      // Calculate new completed count after this toggle
+      const newCompletedCount = category.items.filter((item) => {
+        if (item.id === itemId) return willBeChecked
+        return getItemChecked(item.id)
+      }).length
+      const newProgressPercent = Math.round((newCompletedCount / totalCount) * 100)
+      
+      // If checking and status is not_started, change to in_progress
+      if (willBeChecked && currentStatus === "not_started") {
+        await updateProgress(category.id, "in_progress", newProgressPercent, userName, false)
+      }
+      // If unchecking and no items are checked, change back to not_started
+      else if (!willBeChecked && newCompletedCount === 0 && currentStatus === "in_progress") {
+        await updateProgress(category.id, "not_started", 0, userName, false)
       }
     } catch {
       toast.error("체크 저장에 실패했습니다. 다시 시도해주세요.")
