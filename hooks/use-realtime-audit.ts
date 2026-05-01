@@ -341,20 +341,8 @@ export function useRealtimeNotes(categoryId: string) {
     const localNotes = loadNotesFromStorage(categoryId)
     setNotes(localNotes)
 
-    const supabase = createClient()
-
-    const fetchNotes = async () => {
-      const { data, error } = await supabase
-        .from("shared_notes")
-        .select("*")
-        .eq("category_id", categoryId)
-        .order("created_at", { ascending: false })
-
-      if (!error && data) {
-        setNotes(mergeNotesById(localNotes, data))
-      }
-      setLoading(false)
-    }
+    // Initial fetch
+    fetchNotes().then(() => setLoading(false))
 
     // Start polling for real-time updates
     pollingRef.current = setInterval(fetchNotes, POLLING_INTERVAL)
