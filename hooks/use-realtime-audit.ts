@@ -341,20 +341,8 @@ export function useRealtimeNotes(categoryId: string) {
     const localNotes = loadNotesFromStorage(categoryId)
     setNotes(localNotes)
 
-    const supabase = createClient()
-
-    const fetchNotes = async () => {
-      const { data, error } = await supabase
-        .from("shared_notes")
-        .select("*")
-        .eq("category_id", categoryId)
-        .order("created_at", { ascending: false })
-
-      if (!error && data) {
-        setNotes(mergeNotesById(localNotes, data))
-      }
-      setLoading(false)
-    }
+    // Initial fetch
+    fetchNotes().then(() => setLoading(false))
 
     // Start polling for real-time updates
     pollingRef.current = setInterval(fetchNotes, POLLING_INTERVAL)
@@ -444,7 +432,8 @@ export function useRealtimeNotes(categoryId: string) {
         
         // Trigger immediate refresh after action
         fetchNotes()
-      } catch {
+      } catch (err) {
+        console.error("[v0] addNote error:", err)
         const now = new Date().toISOString()
         setNotes((prev) => [
           {
@@ -563,29 +552,39 @@ export function useRealtimeNotes(categoryId: string) {
 
   const deleteNote = useCallback(
     async (noteId: string, authorName: string) => {
+      // Optimistically remove from UI first
+      setNotes((prev) => prev.filter((note) => note.id !== noteId))
+      
       if (!isConfigured) {
-        setNotes((prev) => prev.filter((note) => note.id !== noteId))
         return
       }
 
-      const supabase = createClient()
-      const note = notes.find((n) => n.id === noteId)
-      
-      // Delete the note
-      await supabase.from("shared_notes").delete().eq("id", noteId)
+      try {
+        const supabase = createClient()
+        const note = notes.find((n) => n.id === noteId)
+        
+        // Delete the note
+        const { error } = await supabase.from("shared_notes").delete().eq("id", noteId)
+        
+        if (error) {
+          console.error("[v0] deleteNote error:", error)
+        }
 
-      // Delete all activity logs related to this note (add, edit, delete)
-      if (note?.item_id) {
-        await supabase
-          .from("activity_logs")
-          .delete()
-          .eq("category_id", categoryId)
-          .eq("item_id", note.item_id)
-          .in("action_type", ["note", "note_edit", "note_delete"])
+        // Delete all activity logs related to this note (add, edit, delete)
+        if (note?.item_id) {
+          await supabase
+            .from("activity_logs")
+            .delete()
+            .eq("category_id", categoryId)
+            .eq("item_id", note.item_id)
+            .in("action_type", ["note", "note_edit", "note_delete"])
+        }
+        
+        // Trigger immediate refresh after action
+        fetchNotes()
+      } catch (err) {
+        console.error("[v0] deleteNote error:", err)
       }
-      
-      // Trigger immediate refresh after action
-      fetchNotes()
     },
     [categoryId, isConfigured, notes, fetchNotes]
   )
