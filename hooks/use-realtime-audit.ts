@@ -362,7 +362,9 @@ export function useRealtimeNotes(categoryId: string) {
 
   const addNote = useCallback(
     async (itemId: string, content: string, authorName: string, attachments?: Attachment[]) => {
+      console.log("[v0] addNote called - isConfigured:", isConfigured, "categoryId:", categoryId, "itemId:", itemId)
       if (!isConfigured) {
+        console.log("[v0] Supabase not configured, saving locally only")
         const now = new Date().toISOString()
         setNotes((prev) => [
           {
