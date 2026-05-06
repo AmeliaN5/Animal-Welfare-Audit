@@ -362,7 +362,9 @@ export function useRealtimeNotes(categoryId: string) {
 
   const addNote = useCallback(
     async (itemId: string, content: string, authorName: string, attachments?: Attachment[]) => {
+      console.log("[v0] addNote called - isConfigured:", isConfigured, "categoryId:", categoryId, "itemId:", itemId)
       if (!isConfigured) {
+        console.log("[v0] Supabase not configured, saving locally only")
         const now = new Date().toISOString()
         setNotes((prev) => [
           {
@@ -389,6 +391,7 @@ export function useRealtimeNotes(categoryId: string) {
 
       try {
         const supabase = createClient()
+        console.log("[v0] Inserting note to Supabase...")
         const { data: inserted, error: insErr } = await supabase
           .from("shared_notes")
           .insert({
@@ -400,6 +403,7 @@ export function useRealtimeNotes(categoryId: string) {
           })
           .select()
           .single()
+        console.log("[v0] Insert result - data:", inserted, "error:", insErr)
         if (insErr) throw insErr
         if (inserted) {
           setNotes((prev) => mergeNotesById([inserted as SharedNote], prev))
